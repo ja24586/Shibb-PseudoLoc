@@ -1,8 +1,8 @@
 // ============================================================================
-// Pseudolocalizer v0.2 — ©2026 Joel Arellano
+// Pseudolocalizer v2 — main thread (sandboxed Figma plugin environment)
 // ============================================================================
 
-figma.showUI(__html__, { width: 300, height: 220 });
+figma.showUI(__html__, { width: 320, height: 380 });
 
 // ----------------------------------------------------------------------------
 // 1. Homoglyph tables — visually-similar characters drawn from Latin
@@ -89,7 +89,32 @@ const PAD_POOL_RTL = [
   "ָ","ֶ","ִ","ֹ","ֻ","ְ","ּ"
 ];
 
+// Vertical edge-case pool — only mixed in when the "vertical edge case
+// characters" toggle is on. Unlike PAD_POOL_BASE (which includes Thai/
+// Vietnamese characters individually), these are pre-assembled MULTI-MARK
+// SEQUENCES — a Thai consonant with a vowel AND a tone mark stacked
+// together, a Vietnamese base letter with two combining marks at once —
+// since true vertical stress comes from marks compounding on one base
+// character, not from isolated marks scattered through padding. Per
+// Google's Material Design language categories, Thai and Vietnamese are
+// both in the "Tall" script tier (extra line height required); Arabic
+// multi-harakat stacks are included as a second tier, only when RTL is
+// ALSO enabled, since Arabic script isn't touched at all otherwise.
+const PAD_POOL_VERTICAL = [
+  // Thai: consonant + vowel + tone mark stacked on one base
+  "กี้", "ปั๊", "มื่", "นี๊", "ลั๋", "วุ้", "ทึ่", "หู้",
+  // Vietnamese: base + two combining marks at once (already in PAD_POOL_BASE
+  // individually; repeated here as the "always include these" priority set)
+  "ệ", "ữ", "ẫ", "ộ", "ẵ"
+];
+
+const PAD_POOL_VERTICAL_RTL = [
+  // Arabic: consonant + shadda (gemination) + a vowel harakat stacked together
+  "بّ", "دّ", "سّ", "لّ", "نّ"
+];
+
 const SIGNAL_PALETTE = ["#FF1493", "#FF4500", "#39FF14", "#00E5FF", "#FFD700"];
+const VERTICAL_OVERFLOW_COLOR = "#FF00E5"; // fixed magenta stroke — visually distinct from the fill-color overflow signal
 
 // ----------------------------------------------------------------------------
 // 2. Grapheme-aware length helper (falls back gracefully — Figma's plugin
@@ -183,30 +208,40 @@ function randomPadWord(pool, minLen, maxLen) {
   return out;
 }
 
-// Builds padding text. When includeRTL is true, RTL word-chunks (Arabic /
-// Hebrew) are embedded roughly one word in three, alongside the base pool —
-// simulating a mixed-bidi string rather than a segregated RTL block.
-function buildPadding(targetExtraLength, includeRTL) {
+// Builds padding text. includeRTL mixes in Arabic/Hebrew word-chunks
+// (~35% of words). verticalEdgeCase mixes in pre-assembled multi-mark
+// stacked sequences (~30% of words) — Thai/Vietnamese always available,
+// Arabic multi-harakat stacks only when RTL is ALSO enabled. The two
+// toggles are independent and compose rather than gating each other.
+function buildPadding(targetExtraLength, includeRTL, verticalEdgeCase) {
   let out = "";
   while (graphemeLength(out) < targetExtraLength) {
     if (out.length > 0) out += " ";
-    const useRTL = includeRTL && Math.random() < 0.35;
-    out += randomPadWord(useRTL ? PAD_POOL_RTL : PAD_POOL_BASE, 3, 8);
+    const roll = Math.random();
+    if (verticalEdgeCase && includeRTL && roll < 0.15) {
+      out += randomPadWord(PAD_POOL_VERTICAL_RTL, 2, 3);
+    } else if (verticalEdgeCase && roll < 0.40) {
+      out += randomPadWord(PAD_POOL_VERTICAL, 2, 4);
+    } else if (includeRTL && roll < 0.70) {
+      out += randomPadWord(PAD_POOL_RTL, 3, 8);
+    } else {
+      out += randomPadWord(PAD_POOL_BASE, 3, 8);
+    }
   }
   return out;
 }
 
-function pseudolocalizeLine(line, includeRTL, counter) {
+function pseudolocalizeLine(line, includeRTL, verticalEdgeCase, counter) {
   if (line.trim().length === 0) return line; // preserve blank lines / pure whitespace
   const decorated = protectedDecorate(line, counter);
   const lineLen = graphemeLength(line);
   const targetExtra = Math.round(lineLen * expansionRatio(lineLen));
-  const padding = targetExtra > 0 ? buildPadding(targetExtra, includeRTL) : "";
+  const padding = targetExtra > 0 ? buildPadding(targetExtra, includeRTL, verticalEdgeCase) : "";
   return padding ? "[" + decorated + " " + padding + "]" : "[" + decorated + "]";
 }
 
-function pseudolocalize(text, includeRTL, counter) {
-  return text.split("\n").map((line) => pseudolocalizeLine(line, includeRTL, counter)).join("\n");
+function pseudolocalize(text, includeRTL, verticalEdgeCase, counter) {
+  return text.split("\n").map((line) => pseudolocalizeLine(line, includeRTL, verticalEdgeCase, counter)).join("\n");
 }
 
 // ----------------------------------------------------------------------------
@@ -340,6 +375,150 @@ function getBackgroundColor(node) {
   return { r: 1, g: 1, b: 1 }; // default Figma canvas white
 }
 
+// ----------------------------------------------------------------------------
+// 6. Auto-layout overflow detection.
+//    Fixed-size text nodes (textAutoResize: NONE) self-clip — that's what
+//    the measurement block in run() catches. Auto-layout / "hug" text nodes
+//    (HEIGHT or WIDTH_AND_HEIGHT) are DESIGNED to grow, so a fixed-size-style
+//    check doesn't apply to them. Instead, growth is a problem when it
+//    escapes a CLIPPING ancestor further up the tree — a fixed-size parent
+//    frame, an auto-layout frame with a maxWidth/maxHeight ceiling, a
+//    section, etc. Figma exposes exactly this via `clipsContent`: any
+//    frame-like node with clipsContent === true visually clips whatever
+//    doesn't fit inside its absoluteBoundingBox. Rather than reverse-engineer
+//    every sizing-mode combination ourselves, we just ask Figma's own layout
+//    engine (which has already reflowed everything live, the moment
+//    node.characters was set) whether the text node's rendered box still
+//    fits inside every clipping ancestor between it and the page.
+// ----------------------------------------------------------------------------
+
+function checkAncestorClipOverflow(node) {
+  const nodeBox = node.absoluteBoundingBox;
+  const result = { horizontal: false, vertical: false, ancestorName: null };
+  if (!nodeBox) return result;
+
+  let current = node.parent;
+  while (current && current.type !== "PAGE" && current.type !== "DOCUMENT") {
+    if ("clipsContent" in current && current.clipsContent === true) {
+      const ancestorBox = current.absoluteBoundingBox;
+      if (ancestorBox) {
+        const escapesLeft = nodeBox.x < ancestorBox.x - 0.5;
+        const escapesRight = nodeBox.x + nodeBox.width > ancestorBox.x + ancestorBox.width + 0.5;
+        const escapesTop = nodeBox.y < ancestorBox.y - 0.5;
+        const escapesBottom = nodeBox.y + nodeBox.height > ancestorBox.y + ancestorBox.height + 0.5;
+        const escapesHorizontally = escapesLeft || escapesRight;
+        const escapesVertically = escapesTop || escapesBottom;
+        if (escapesHorizontally) result.horizontal = true;
+        if (escapesVertically) result.vertical = true;
+        if ((escapesHorizontally || escapesVertically) && !result.ancestorName) {
+          result.ancestorName = current.name;
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return result;
+}
+
+// Vertical diacritic / glyph-ink overflow. absoluteBoundingBox is the
+// node's nominal layout box; absoluteRenderBounds is Figma's own accounting
+// of the actual rendered ink extent, including anything — diacritics,
+// ascenders, descenders — that falls outside that nominal box. Comparing
+// the two catches tall marks poking above the first line or dropping below
+// the last line.
+//
+// Known limitation, stated plainly: this catches ink escaping the node's
+// OWN outer box. It does NOT catch a diacritic on one interior line visually
+// colliding with a descender on the line above it inside a multi-line
+// block — Figma's Plugin API doesn't expose per-line bounding boxes, and
+// catching that specific case would require rendering to an image and doing
+// pixel-level analysis, a meaningfully heavier feature than this check.
+function checkVerticalOverflow(node) {
+  const nominal = node.absoluteBoundingBox;
+  const rendered = node.absoluteRenderBounds;
+  if (!nominal || !rendered) return false;
+
+  const overflowsTop = rendered.y < nominal.y - 0.5;
+  const overflowsBottom = rendered.y + rendered.height > nominal.y + nominal.height + 0.5;
+  return overflowsTop || overflowsBottom;
+}
+
+// ----------------------------------------------------------------------------
+// 6b. Issue stickies — disambiguating annotations placed adjacent to each
+//     flagged node, one per node with ALL applicable issues listed together
+//     (rather than one sticky per issue type, to avoid stacking multiple
+//     notes on the same spot). Marked via setPluginData so a later run can
+//     find and clear stale ones before creating fresh ones — otherwise
+//     repeated runs would accumulate duplicates.
+// ----------------------------------------------------------------------------
+
+const STICKY_MARKER_KEY = "pseudolocStickyIssue";
+
+function clearPreviousStickies() {
+  const stale = figma.currentPage.findAll(
+    (n) => { try { return n.getPluginData(STICKY_MARKER_KEY) === "true"; } catch (e) { return false; } }
+  );
+  stale.forEach((n) => n.remove());
+}
+
+async function createIssueSticky(node, issues) {
+  const stickyWidth = 220;
+
+  await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+
+  const frame = figma.createFrame();
+  frame.name = "\u26A0 Pseudoloc Issue: " + node.name;
+  frame.layoutMode = "VERTICAL";
+  frame.primaryAxisSizingMode = "AUTO";
+  frame.counterAxisSizingMode = "FIXED";
+  frame.resize(stickyWidth, 10);
+  frame.paddingLeft = 12;
+  frame.paddingRight = 12;
+  frame.paddingTop = 10;
+  frame.paddingBottom = 10;
+  frame.itemSpacing = 6;
+  frame.cornerRadius = 4;
+  frame.fills = [{ type: "SOLID", color: hexToRgbObj("#FFF7B2") }]; // sticky-note yellow
+  frame.strokes = [{ type: "SOLID", color: hexToRgbObj(issues[0].color) }];
+  frame.strokeWeight = 2;
+  frame.setPluginData(STICKY_MARKER_KEY, "true");
+
+  const title = figma.createText();
+  title.fontName = { family: "Inter", style: "Bold" };
+  title.characters = "\u26A0 " + node.name;
+  title.fontSize = 12;
+  title.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+  title.textAutoResize = "HEIGHT";
+  title.layoutSizingHorizontal = "FILL";
+  frame.appendChild(title);
+
+  for (const issue of issues) {
+    const body = figma.createText();
+    body.fontName = { family: "Inter", style: "Regular" };
+    body.characters = issue.message;
+    body.fontSize = 11;
+    body.fills = [{ type: "SOLID", color: hexToRgbObj(issue.color) }];
+    body.textAutoResize = "HEIGHT";
+    body.layoutSizingHorizontal = "FILL";
+    frame.appendChild(body);
+  }
+
+  figma.currentPage.appendChild(frame);
+
+  // Adjacent (right) of the flagged node, vertically centered on it. Default
+  // is the TEXT NODE itself in every case, including ancestor-clip issues —
+  // simplest and always available, though the alternative (centering on the
+  // clipping ancestor frame instead) is a real option if that reads better
+  // in practice.
+  const nodeBox = node.absoluteBoundingBox;
+  const margin = 32;
+  frame.x = nodeBox.x + nodeBox.width + margin;
+  frame.y = nodeBox.y + nodeBox.height / 2 - frame.height / 2;
+
+  return frame;
+}
+
 function pickSignalColor(bg) {
   let best = null;
   let bestRatio = 0;
@@ -352,6 +531,82 @@ function pickSignalColor(bg) {
     }
   }
   return best;
+}
+
+// ----------------------------------------------------------------------------
+// 5b. Implied-container overflow — a fallback for the case where neither the
+//     fixed-box self-check nor the ancestor-clipsContent check applies. Very
+//     common mockup pattern: a decorative rectangle drawn as a "text field"
+//     or "chip," with the actual text sitting on top of it as an unrelated,
+//     unclipped sibling — never structurally parented, so Figma's own layout
+//     engine has no containment relationship to enforce and nothing gets
+//     clipped, even though it visually should.
+//
+//     Rather than reverse-engineer every visual-container pattern, this
+//     infers containment geometrically: before editing, check whether the
+//     text's ORIGINAL bounding box was substantially (>80%) contained inside
+//     a sibling shape. If so, that sibling is treated as an implied
+//     container, and overflow is checked against it after editing — even
+//     though no actual clipping relationship exists. This is inference, not
+//     certainty, so it's labeled distinctly from the structural checks
+//     rather than presented with the same confidence.
+// ----------------------------------------------------------------------------
+
+const CONTAINER_LIKE_TYPES = ["RECTANGLE", "FRAME", "COMPONENT", "INSTANCE", "ELLIPSE"];
+
+function findImpliedContainerSibling(node, originalBox) {
+  const parent = node.parent;
+  if (!parent || !("children" in parent) || !originalBox) return null;
+
+  const textArea = originalBox.width * originalBox.height;
+  if (textArea <= 0) return null;
+
+  let bestCandidate = null;
+  let bestRatio = 0;
+
+  for (const sibling of parent.children) {
+    if (sibling === node) continue;
+    if (CONTAINER_LIKE_TYPES.indexOf(sibling.type) === -1) continue;
+    if (sibling.visible === false) continue;
+    const sibBox = sibling.absoluteBoundingBox;
+    if (!sibBox) continue;
+
+    const overlapLeft = Math.max(originalBox.x, sibBox.x);
+    const overlapTop = Math.max(originalBox.y, sibBox.y);
+    const overlapRight = Math.min(originalBox.x + originalBox.width, sibBox.x + sibBox.width);
+    const overlapBottom = Math.min(originalBox.y + originalBox.height, sibBox.y + sibBox.height);
+    if (overlapRight <= overlapLeft || overlapBottom <= overlapTop) continue; // no overlap at all
+
+    const overlapArea = (overlapRight - overlapLeft) * (overlapBottom - overlapTop);
+    const overlapRatio = overlapArea / textArea;
+
+    if (overlapRatio > 0.8 && overlapRatio > bestRatio) {
+      bestRatio = overlapRatio;
+      bestCandidate = sibling;
+    }
+  }
+
+  return bestCandidate;
+}
+
+function checkImpliedContainerOverflow(node, originalBox) {
+  const result = { horizontal: false, vertical: false, containerName: null };
+  const sibling = findImpliedContainerSibling(node, originalBox);
+  if (!sibling) return result;
+
+  const newBox = node.absoluteBoundingBox;
+  const sibBox = sibling.absoluteBoundingBox;
+  if (!newBox || !sibBox) return result;
+
+  const escapesLeft = newBox.x < sibBox.x - 0.5;
+  const escapesRight = newBox.x + newBox.width > sibBox.x + sibBox.width + 0.5;
+  const escapesTop = newBox.y < sibBox.y - 0.5;
+  const escapesBottom = newBox.y + newBox.height > sibBox.y + sibBox.height + 0.5;
+
+  result.horizontal = escapesLeft || escapesRight;
+  result.vertical = escapesTop || escapesBottom;
+  if (result.horizontal || result.vertical) result.containerName = sibling.name;
+  return result;
 }
 
 // ----------------------------------------------------------------------------
@@ -371,7 +626,7 @@ function collectTextNodes(nodes) {
   return result;
 }
 
-async function run(includeRTL, showSummary) {
+async function run(includeRTL, showSummary, verticalEdgeCase, addStickies) {
   const selection = figma.currentPage.selection;
 
   if (selection.length === 0) {
@@ -386,11 +641,17 @@ async function run(includeRTL, showSummary) {
     return;
   }
 
+  clearPreviousStickies(); // always clear stale stickies from a prior run, regardless of this run's toggle state
+
   const stats = {
     processed: 0,
-    overflowed: 0,
+    horizontalOverflow: 0,
+    verticalOverflow: 0,
+    impliedContainerFlags: 0,
+    possibleLineCollision: 0,
+    stickiesCreated: 0,
     skippedLocked: 0,
-    skippedAutoSized: 0,
+    autoLayoutChecked: 0,
     skippedEmpty: 0,
     fontIssues: 0,
     errors: 0,
@@ -430,10 +691,11 @@ async function run(includeRTL, showSummary) {
         x: node.x,
         y: node.y
       };
+      const originalBox = node.absoluteBoundingBox; // captured pre-edit, for the implied-container fallback below
 
       const originalText = node.characters;
       const placeholderCounter = { count: 0 };
-      const pseudo = pseudolocalize(originalText, includeRTL, placeholderCounter);
+      const pseudo = pseudolocalize(originalText, includeRTL, verticalEdgeCase, placeholderCounter);
       stats.placeholdersProtected += placeholderCounter.count;
 
       // Set the new text while still in the ORIGINAL font. This lets us
@@ -442,13 +704,21 @@ async function run(includeRTL, showSummary) {
       // narrower or wider than whatever ships to production.
       node.characters = pseudo;
 
-      let overflowed = false;
-      if (originalStyle.textAutoResize === "NONE") {
+      let horizontalOverflow = false;
+      let verticalOverflow = false;
+      let horizontalDelta = 0;
+      let verticalDelta = 0;
+      let clipAncestorName = null;
+      const isAutoSized = originalStyle.textAutoResize !== "NONE";
+      if (!isAutoSized) {
         try {
           node.textAutoResize = "WIDTH_AND_HEIGHT";
           const measuredW = node.width;
           const measuredH = node.height;
-          overflowed = measuredW > originalStyle.width + 0.5 || measuredH > originalStyle.height + 0.5;
+          horizontalOverflow = measuredW > originalStyle.width + 0.5;
+          verticalOverflow = measuredH > originalStyle.height + 0.5;
+          horizontalDelta = Math.round(measuredW - originalStyle.width);
+          verticalDelta = Math.round(measuredH - originalStyle.height);
         } finally {
           node.textAutoResize = "NONE";
           node.resizeWithoutConstraints(originalStyle.width, originalStyle.height);
@@ -456,7 +726,7 @@ async function run(includeRTL, showSummary) {
           node.y = originalStyle.y;
         }
       } else {
-        stats.skippedAutoSized++;
+        stats.autoLayoutChecked++;
       }
 
       // Now assign the correct Noto family per script range so every
@@ -473,16 +743,98 @@ async function run(includeRTL, showSummary) {
         node.setRangeLineHeight(0, len, originalStyle.lineHeight);
       }
 
+      // Ancestor-clip check runs AFTER font/size/spacing reapplication above,
+      // since those edits can themselves shift wrapping and final dimensions
+      // — checking any earlier would measure a transitional, not final, state.
+      let isImpliedContainer = false;
+      if (isAutoSized) {
+        const clip = checkAncestorClipOverflow(node);
+        horizontalOverflow = clip.horizontal;
+        verticalOverflow = clip.vertical;
+        clipAncestorName = clip.ancestorName;
+
+        // Fallback: no structural clipping ancestor caught anything — check
+        // whether this text was originally sitting inside an unrelated,
+        // unclipped decorative shape (the classic "text over a drawn input
+        // box" pattern) that it may now be escaping.
+        if (!horizontalOverflow && !verticalOverflow) {
+          const implied = checkImpliedContainerOverflow(node, originalBox);
+          if (implied.horizontal || implied.vertical) {
+            horizontalOverflow = implied.horizontal;
+            verticalOverflow = implied.vertical;
+            clipAncestorName = implied.containerName;
+            isImpliedContainer = true;
+            stats.impliedContainerFlags++;
+          }
+        }
+      }
+
       stats.processed++;
       const origLen = graphemeLength(originalText) || 1;
       const newLen = graphemeLength(pseudo);
       stats.totalExpansionPct += ((newLen - origLen) / origLen) * 100;
 
-      if (overflowed) {
-        stats.overflowed++;
+      // Three genuinely distinct failure modes, disambiguated rather than
+      // collapsed into one signal: horizontal box/ancestor overflow, vertical
+      // box/ancestor overflow, and vertical ink escaping the node's own box
+      // (the closest available approximation for inter-line collision —
+      // see the caveat on checkVerticalOverflow above).
+      const issues = [];
+
+      if (horizontalOverflow) {
+        stats.horizontalOverflow++;
+        issues.push({
+          type: "horizontal",
+          color: "#FF6A00",
+          message: isImpliedContainer
+            ? "Horizontal overflow (inferred) \u2014 escapes the bounds of \"" + clipAncestorName + "\", a nearby shape it visually sits inside but isn't structurally clipped by. Verify visually."
+            : isAutoSized
+            ? "Horizontal overflow \u2014 escapes " + (clipAncestorName || "a clipping ancestor") + "."
+            : "Horizontal overflow \u2014 exceeds container width by " + horizontalDelta + "px."
+        });
+      }
+      if (verticalOverflow) {
+        stats.verticalOverflow++;
+        issues.push({
+          type: "vertical",
+          color: "#0088FF",
+          message: isImpliedContainer
+            ? "Vertical overflow (inferred) \u2014 escapes the bounds of \"" + clipAncestorName + "\", a nearby shape it visually sits inside but isn't structurally clipped by. Verify visually."
+            : isAutoSized
+            ? "Vertical overflow \u2014 escapes " + (clipAncestorName || "a clipping ancestor") + "."
+            : "Vertical overflow \u2014 exceeds container height by " + verticalDelta + "px."
+        });
+      }
+      if (horizontalOverflow || verticalOverflow) {
         const bg = getBackgroundColor(node);
         const signal = pickSignalColor(bg);
         node.fills = [{ type: "SOLID", color: signal }];
+      }
+
+      // Vertical diacritic/ink overflow — always checked, not gated behind
+      // any toggle (only the character INCLUSION is optional; detection
+      // isn't). Uses a stroke rather than a fill color so it stays visually
+      // distinguishable from the box/ancestor overflow signal above, even
+      // when both fire on the same node.
+      if (checkVerticalOverflow(node)) {
+        stats.possibleLineCollision++;
+        node.strokes = [{ type: "SOLID", color: hexToRgbObj(VERTICAL_OVERFLOW_COLOR) }];
+        node.strokeWeight = 2;
+        issues.push({
+          type: "lineCollision",
+          color: VERTICAL_OVERFLOW_COLOR,
+          message: "Possible line collision \u2014 glyph ink (diacritics/marks) extends beyond this box vertically. Approximation only, since Figma's plugin API doesn't expose per-line bounds \u2014 verify visually."
+        });
+      }
+
+      if (issues.length > 0 && addStickies) {
+        try {
+          await createIssueSticky(node, issues);
+          stats.stickiesCreated++;
+        } catch (stickyErr) {
+          stats.errors++;
+          console.error("Sticky creation error on node:", node.name, stickyErr);
+        }
       }
     } catch (err) {
       stats.errors++;
@@ -496,7 +848,9 @@ async function run(includeRTL, showSummary) {
     figma.ui.postMessage({ type: "results", stats: stats, notice: null });
   } else {
     let msg = "Pseudolocalized " + stats.processed + " layer(s).";
-    if (stats.overflowed > 0) msg += " " + stats.overflowed + " overrun.";
+    if (stats.horizontalOverflow > 0) msg += " " + stats.horizontalOverflow + " horizontal overrun.";
+    if (stats.verticalOverflow > 0) msg += " " + stats.verticalOverflow + " vertical overrun.";
+    if (stats.possibleLineCollision > 0) msg += " " + stats.possibleLineCollision + " possible line collision.";
     if (stats.errors > 0) msg += " " + stats.errors + " error(s) — check console.";
     figma.notify(msg);
     figma.closePlugin();
@@ -505,7 +859,7 @@ async function run(includeRTL, showSummary) {
 
 figma.ui.onmessage = (msg) => {
   if (msg.type === "run") {
-    run(!!msg.includeRTL, !!msg.showSummary);
+    run(!!msg.includeRTL, !!msg.showSummary, !!msg.verticalEdgeCase, !!msg.addStickies);
   } else if (msg.type === "close") {
     figma.closePlugin();
   } else if (msg.type === "resize") {

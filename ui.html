@@ -94,10 +94,21 @@
       Include RTL test characters (Arabic + Hebrew)
     </label>
     <label class="checkbox">
+      <input type="checkbox" id="verticalToggle" />
+      Include vertical edge-case characters (recommended for Thai, Vietnamese, Arabic — Hindi/Devanagari and Telugu are also high-risk per Google's script guidelines, but aren't yet supported by this plugin)
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" id="stickyToggle" />
+      Add sticky notes explaining each flagged issue
+    </label>
+    <label class="checkbox">
       <input type="checkbox" id="summaryToggle" checked />
       Show run summary when done
     </label>
     <button id="run">Pseudolocalize Selection</button>
+    <p style="margin: 8px 0 0 0; font-size: 11px; color: #888;">
+      Vertical diacritic/ink overflow is always checked, regardless of the toggle above — it only controls whether extra stacked-mark characters get added to padding. Horizontal overflow, vertical overflow, and possible line collisions are reported as distinct issues.
+    </p>
     <button id="cancel" class="secondary">Cancel</button>
   </div>
 
@@ -119,9 +130,19 @@
       runBtn.disabled = true;
       runBtn.textContent = "Running…";
       const includeRTL = document.getElementById("rtlToggle").checked;
+      const verticalEdgeCase = document.getElementById("verticalToggle").checked;
+      const addStickies = document.getElementById("stickyToggle").checked;
       const showSummary = document.getElementById("summaryToggle").checked;
       parent.postMessage(
-        { pluginMessage: { type: "run", includeRTL: includeRTL, showSummary: showSummary } },
+        {
+          pluginMessage: {
+            type: "run",
+            includeRTL: includeRTL,
+            verticalEdgeCase: verticalEdgeCase,
+            addStickies: addStickies,
+            showSummary: showSummary
+          }
+        },
         "*"
       );
     };
@@ -136,10 +157,14 @@
 
     const STAT_LABELS = {
       processed: "Strings pseudolocalized",
-      overflowed: "Containers overrun",
+      horizontalOverflow: "Horizontal overflow",
+      verticalOverflow: "Vertical overflow",
+      impliedContainerFlags: "Inferred overflow (unclipped decorative shape)",
+      possibleLineCollision: "Possible line collision (approx.)",
+      stickiesCreated: "Issue stickies created",
       placeholdersProtected: "Placeholder tokens protected",
       skippedLocked: "Locked / hidden layers skipped",
-      skippedAutoSized: "Auto-sized layers (not checked for overflow)",
+      autoLayoutChecked: "Auto-layout / hug layers checked",
       skippedEmpty: "Empty text layers skipped",
       fontIssues: "Font-load fallbacks",
       errors: "Errors",
