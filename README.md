@@ -179,19 +179,13 @@ reload needed. Diagnostic colors (the orange/blue/magenta overflow
 signals, error red) stay the same in both themes on purpose — those are
 meaningful signals, not decorative choices.
 
-## Deliberately out of scope (by design)
+## Out of scope
 
 - **Full sentence-level RTL** isn't implemented — the RTL toggle embeds
   Arabic/Hebrew word-chunks within otherwise-LTR strings. Testing a fully
   mirrored RTL layout (icon flipping, alignment reversal, direction-aware
   components) is a different, larger test surface than what this plugin
-  covers.
-- **Whole-page / whole-file scanning has no dedicated feature.** `Ctrl+A`
-  (or `Cmd+A`) on a page selects everything at the top level, and the
-  plugin's collector recurses into every child of whatever's selected —
-  frames, groups, sections, component instances — so a page-wide run needs
-  no new code, just that keyboard shortcut before running. No whole-*file*
-  (multi-page) option is offered by design.
+  covers. 
 
 ## Files
 
