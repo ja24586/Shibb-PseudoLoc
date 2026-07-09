@@ -1,25 +1,26 @@
 # Shibb — a pseudolocalization plugin for Figma
 
 # Overview
-Find localization bugs before sending copy to vendors or engineering. Shibb
+Find localization bugs before sending copy to vendors or engineering. Shibb
 generates realistic pseudolocalized content, automatically detects layout
-failures, protects localization placeholders, simulates RTL and multilingual
-edge cases, and helps designers catch internationalization issues before they
-hit your bottom line.
+failures, protects placeholders and other non-localizable content, simulates
+RTL and multilingual edge cases, and helps designers catch internationalization
+issues before they hit your bottom line.
 
 # Features
 - 📦 Finds hidden Auto Layout issues
 - ✏️ Checks inferred containers to catch text-nesting errors
-- 🌍 Realistic multilingual pseudolocalization- not just Latin with accents
-- 🔒 Recognizes and ignores placeholder tokens & regex
-- 📏 Applies IBM's dynamic text expansion rules based on visual length, not
-charater count
+- 🌍 Realistic multilingual pseudolocalization — not just Latin with accents
+- 🔒 Recognizes and ignores placeholders, dates, IDs, and other non-localizable content
+- 📏 Applies IBM's dynamic text expansion rules based on visual length, not character count
 - 📐 Checks for collisions between lines
 - 🔤 Script-aware dynamic Noto assignment & missing script check
 - 🎯 Deterministic pseudoLOC output persists across runs
-- 📋 Summary report describes each issue, with exportable log
+- 📋 Summary report describes each issue, with an exportable summary
 - ↔️ RTL (Arabic & Hebrew) option
 - 🈳 True edge-case stress testing via CJK, Thai, & Vietnamese charsets
+- 🌓 Automatically matches Figma's light/dark theme
+- 📍 Review panel avoids covering the exact issue it's describing
 
 ## Details
 
@@ -88,15 +89,34 @@ charater count
   plugin already skips locked layers**, so the simplest way to exclude
   status-bar chrome from testing is to lock those layers in your source
   file — no naming convention or exceptions list required.
-- **Placeholder/interpolation tokens are protected.** `{{name}}`,
-  `${username}`, `{count}`, `%s`/`%d`/`%1$s` pass through untouched; only
-  the surrounding text gets pseudolocalized.
+- **Non-localizable content is protected**, not just interpolation
+  placeholders. `{{name}}`, `${username}`, `{count}`, `%s`/`%d`/`%1$s`,
+  dates (ISO 8601, numeric, and month-name formats), times, GUIDs/UUIDs,
+  URLs, email addresses, currency and percent values, plain numbers, and
+  hex color codes all pass through untouched — only the surrounding prose
+  gets pseudolocalized. If a whole line is *nothing but* one of these (a
+  layer that's just a date, just an email address, just a placeholder) the
+  entire node is skipped rather than bracket-wrapped and padded around
+  content that was never meant to carry translatable text. **Deliberately
+  not covered**: brand names and proper nouns. That's a vocabulary
+  judgment, not a structural pattern — it needs a maintained glossary, not
+  a regex, and isn't implemented here.
+- **A node that's already pseudolocalized and unchanged since gets
+  skipped**, rather than pseudolocalized again — re-running the plugin
+  doesn't compound bracket-wraps on top of previous runs. Detected by
+  comparing a node's current text against the exact output the plugin last
+  wrote to it (stored via `setPluginData`), not just a boolean flag — so
+  editing or reverting the source text after a prior run is recognized as
+  new content and processed normally, rather than skipped by mistake.
 - **Style preservation**: font size, letter spacing, and (if explicitly
   set) line height are captured from the original typeface and reapplied
   to the Noto replacement, so it approximates the source typeface's
   density rather than defaulting to Noto's own spacing.
-- Locked and hidden text layers, and empty text layers, are skipped
-  automatically and counted in the results.
+- Locked and hidden text layers are skipped automatically, as are empty
+  text layers and the non-localizable/already-pseudolocalized cases above
+  — all counted together in the Summary as "Excluded / empty layers
+  skipped," with the specific reason shown per layer when you expand that
+  row.
 
 ## How it runs
 
@@ -107,23 +127,29 @@ Two commands, both invoked from the Figma plugin menu:
   native toast: "Issues: 3, Skipped: 1, Errors: 2" (each segment only
   appears if its count is above zero), or "No issues found" if the design's
   clean. If there's anything worth reviewing, the toast includes a
-  **Details** button that opens the full panel on demand.
-- **Settings** opens a separate small panel with three toggles (RTL,
-  vertical edge-case characters, always show summary) plus a link to file
-  feedback or feature requests. Changes autosave immediately — no Save
-  button — and persist across every file you open on this machine (via
-  `figma.clientStorage`, scoped per-user and not synced across machines).
-  Turning "Always show summary" on skips the toast entirely and opens the
-  full panel on every run, even a clean one.
+  **Details** button that opens the full Summary on demand.
+- **Settings** opens a separate small panel. Three toggles at the top —
+  Include RTL edge cases, Include vertical glyph edge cases, Always show
+  Summary report — followed by Done/Cancel, then a **Support** section at
+  the bottom with a link to file feedback or feature requests. Changes
+  autosave immediately — no Save button — and persist across every file
+  you open on this machine (via `figma.clientStorage`, scoped per-user and
+  not synced across machines). Turning "Always show Summary report" on
+  skips the toast entirely and opens the Summary on every run, even a
+  clean one.
 
-## The Summary report
+## The Summary
 
-The post-run Summary displaces:
-1. LOC issues found,
-2. Locked/hidden layers skipped,
-3. Empty layers skipped, and
-4. Errors, such as missing typefaces.
+The post-run Summary displays:
+1. LOC issues found
+2. Locked/hidden layers skipped
+3. Excluded/empty layers skipped
+4. Errors, such as missing typefaces
 
+Rows with findings bold their label and count, expand via a chevron to
+reveal a Back/Next reviewer, and auto-expand the highest-priority row with
+results (LOC issues first, then errors, then skips) when the Summary
+first appears. Only one row is expanded at a time.
 
 Clicking through Back/Next jumps the canvas selection and viewport to the
 relevant layer, and the panel checks whether its own on-screen position now
@@ -139,16 +165,32 @@ hover or keyboard focus (Material 3 plain-tooltip pattern — no click
 needed, and the tooltip clamps itself to stay within the panel rather than
 running off the edge).
 
-When there's at least one error, a **View Log** button generates a
-downloadable `.txt` file listing each one in plain language, with a direct
-resource link where relevant (e.g. a font's install page).
+An **Export** button appears whenever any row has findings — not just
+errors — and generates a downloadable `.txt` file listing everything from
+the Summary: every LOC issue, every locked/hidden and excluded/empty skip,
+and every error, each in plain language with a direct resource link where
+relevant (e.g. a font's install page).
 
-The panel follows Figma's own light/dark theme automatically, via
+The Summary follows Figma's own light/dark theme automatically, via
 `figma.showUI`'s `themeColors` option and Figma's `.figma-dark` class on
 `<html>` — it updates live if the user switches theme mid-session, no
 reload needed. Diagnostic colors (the orange/blue/magenta overflow
 signals, error red) stay the same in both themes on purpose — those are
 meaningful signals, not decorative choices.
+
+## Deliberately out of scope (by design)
+
+- **Full sentence-level RTL** isn't implemented — the RTL toggle embeds
+  Arabic/Hebrew word-chunks within otherwise-LTR strings. Testing a fully
+  mirrored RTL layout (icon flipping, alignment reversal, direction-aware
+  components) is a different, larger test surface than what this plugin
+  covers.
+- **Whole-page / whole-file scanning has no dedicated feature.** `Ctrl+A`
+  (or `Cmd+A`) on a page selects everything at the top level, and the
+  plugin's collector recurses into every child of whatever's selected —
+  frames, groups, sections, component instances — so a page-wide run needs
+  no new code, just that keyboard shortcut before running. No whole-*file*
+  (multi-page) option is offered by design.
 
 ## Files
 
@@ -156,7 +198,7 @@ meaningful signals, not decorative choices.
   and `Settings...`)
 - `code.js` — main thread logic (runs in Figma's plugin sandbox)
 - `ui.html` — the plugin UI panel, rendering either the Settings view or
-  the results panel depending on which command launched it
+  the Summary depending on which command launched it
 
 ## Easy tuning points
 
