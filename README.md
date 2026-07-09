@@ -1,6 +1,7 @@
 # Shibb — a pseudolocalization plugin for Figma
 
 # Overview
+
 Find localization bugs before sending copy to vendors or engineering. Shibb
 generates realistic pseudolocalized content, automatically detects layout
 failures, protects placeholders and other non-localizable content, simulates
@@ -8,6 +9,7 @@ RTL and multilingual edge cases, and helps designers catch internationalization
 issues before they hit your bottom line.
 
 # Features
+
 - 📦 Finds hidden Auto Layout issues
 - ✏️ Checks inferred containers to catch text-nesting errors
 - 🌍 Realistic multilingual pseudolocalization — not just Latin with accents
@@ -20,7 +22,6 @@ issues before they hit your bottom line.
 - ↔️ RTL (Arabic & Hebrew) option
 - 🈳 True edge-case stress testing via CJK, Thai, & Vietnamese charsets
 - 🌓 Automatically matches Figma's light/dark theme
-- 📍 Review panel avoids covering the exact issue it's describing
 
 ## Details
 
