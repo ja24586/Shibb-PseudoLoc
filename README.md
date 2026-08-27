@@ -20,7 +20,7 @@ issues before they hit your bottom line.
 - ↔️ RTL (Arabic & Hebrew) option
 - 🈳 True edge-case stress testing via CJK, Thai, & Vietnamese charsets
 - 🌓 Automatically matches Figma's light/dark theme
-- 📍 Review panel avoid covering the issue it's describing
+- 📍 Review panel avoids covering the exact issue it's describing
 
 ## Details
 
@@ -107,7 +107,11 @@ issues before they hit your bottom line.
   comparing a node's current text against the exact output the plugin last
   wrote to it (stored via `setPluginData`), not just a boolean flag — so
   editing or reverting the source text after a prior run is recognized as
-  new content and processed normally, rather than skipped by mistake.
+  new content and processed normally, rather than skipped by mistake. Its
+  count shows in the Summary as its own plain stat, separate from the
+  other skip reasons — there's nothing to act on here, so it doesn't get a
+  chevron, a review panel, or per-item explanatory text the way locked/
+  hidden, empty, and excluded skips do.
 - **Style preservation**: font size, letter spacing, and (if explicitly
   set) line height are captured from the original typeface and reapplied
   to the Noto replacement, so it approximates the source typeface's
@@ -144,12 +148,17 @@ The post-run Summary displays:
 1. LOC issues found
 2. Locked/hidden layers skipped
 3. Excluded/empty layers skipped
-4. Errors, such as missing typefaces
+4. Already pseudolocalized (a plain count only — no chevron, nothing to
+   review, since there's nothing to act on)
+5. Errors, such as missing typefaces
 
 Rows with findings bold their label and count, expand via a chevron to
 reveal a Back/Next reviewer, and auto-expand the highest-priority row with
 results (LOC issues first, then errors, then skips) when the Summary
-first appears. Only one row is expanded at a time.
+first appears. Only one row is expanded at a time. "Already pseudolocalized"
+sits outside this system entirely — it bolds like the others when nonzero,
+but never expands, since a count with nothing actionable behind it doesn't
+need a review panel.
 
 Clicking through Back/Next jumps the canvas selection and viewport to the
 relevant layer, and the panel checks whether its own on-screen position now
@@ -174,9 +183,18 @@ relevant (e.g. a font's install page).
 The Summary follows Figma's own light/dark theme automatically, via
 `figma.showUI`'s `themeColors` option and Figma's `.figma-dark` class on
 `<html>` — it updates live if the user switches theme mid-session, no
-reload needed. Diagnostic colors (the orange/blue/magenta overflow
-signals, error red) stay the same in both themes on purpose — those are
-meaningful signals, not decorative choices.
+reload needed. Review-panel messages use one neutral color regardless of
+condition type (horizontal/vertical overflow, line collision) — orange,
+blue, and magenta used to differentiate these, but that made color the
+only thing telling two stacked messages apart whenever their wording was
+similar, which isn't accessible for colorblindness and isn't what color
+should be used for. Messages are numbered instead when a layer has more
+than one. Error messages keep a distinct red — that's a severity signal,
+a legitimate use of color, not an enumeration one. None of this touches
+how flagged text looks *on the canvas* — the contrast-optimized fill
+color and the magenta line-collision stroke are a separate system, for
+spotting issues while scanning a design rather than while reading the
+Summary, and weren't part of this change.
 
 ## Deliberately out of scope (by design)
 
@@ -194,22 +212,31 @@ meaningful signals, not decorative choices.
 
 ## Files
 
-Two files for Figma: `manifest.json` (unavoidable — Figma reads it before
-any code runs, so it can never be merged into anything) and `code.js`
-(main thread logic, plus the entire UI embedded directly as a template
-literal string, passed straight to `figma.showUI()` instead of relying on
-manifest.json's `"ui"` field and Figma's `__html__` global — an officially
-documented, fully supported alternative; that field is explicitly optional).
+Standard three-file Figma plugin structure: `manifest.json`, `code.js`
+(main thread logic), and `ui.html` (the panel UI, loaded via manifest's
+`"ui"` field into an iframe — Figma's documented "easiest way" to use
+`figma.showUI()`).
 
 - `manifest.json` — plugin config, including the two-command menu (`Run`
   and `Settings...`)
-- `code.js` — everything: main thread logic and the full embedded UI
-- `ui.html` — **kept only as a human-editable reference copy.** Figma
-  never reads this file — proper syntax highlighting just makes it a much
-  saner place to actually edit HTML/CSS/JS than inside a giant string
-  literal. If you change the UI, edit this file, then regenerate the
-  embedded copy in `code.js` before shipping — the two can drift out of
-  sync if you forget.
+- `code.js` — main thread logic (runs in Figma's plugin sandbox)
+- `ui.html` — the plugin UI panel, rendering either the Settings view or
+  the Summary depending on which command launched it
+
+**A single-file version was tried and reverted.** `ui.html`'s entire
+contents were briefly embedded directly into `code.js` as a template
+literal string, passed straight to `figma.showUI()` — an approach Figma's
+own docs confirm is supported, intended to reduce the plugin to two files
+total. In practice this caused the panel to load with a blank body: the
+native title bar rendered, but the injected content didn't, with a
+console error (`Failed to execute 'write' on 'Document': Invalid or
+unexpected token`, inside Figma's `data:text/html;base64` loading path for
+raw-string UIs specifically). The exact mechanism wasn't confirmed —
+diagnosing it further would need live debugging access this project
+doesn't have — but the failure was reproducible and specific to the
+raw-string approach, so it was reverted back to the standard three-file,
+separate-`ui.html` structure, which had been working reliably throughout
+the rest of this project.
 
 ## Easy tuning points
 
