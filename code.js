@@ -874,9 +874,27 @@ async function run(includeRTL, verticalEdgeCase) {
   const skippedLockedLog = []; // { nodeId, nodeName } — one entry per locked/hidden layer skipped
   const skippedEmptyLog = [];  // { nodeId, nodeName, reason } — empty layers, already-pseudolocalized layers, and layers that are nothing but a date/number/ID/placeholder
 
+  // node.locked and node.visible are each independent of their parent —
+  // confirmed directly from Figma's own docs: "The node isn't necessarily
+  // locked if [parent].locked === true." A child can report locked=false
+  // while sitting under a genuinely locked ancestor (a locked "Keyboard"
+  // frame with an unlocked "Emoji" key inside it, found via real testing),
+  // and Figma's own lock property doesn't stop a plugin from writing to a
+  // node either way — skipping locked content here is a courtesy this
+  // plugin chooses to honor, not something Figma enforces. Checking only
+  // the node's own flag misses this; walking the ancestor chain doesn't.
+  function isLockedOrHiddenIncludingAncestors(node) {
+    let current = node;
+    while (current) {
+      if (current.locked || current.visible === false) return true;
+      current = current.parent;
+    }
+    return false;
+  }
+
   for (const node of textNodes) {
     try {
-      if (node.locked || node.visible === false) {
+      if (isLockedOrHiddenIncludingAncestors(node)) {
         stats.skippedLocked++;
         skippedLockedLog.push({ nodeId: node.id, nodeName: node.name });
         continue;
@@ -1164,11 +1182,27 @@ function avoidCoveringNode(node) {
     const viewBounds = figma.viewport.bounds; // {x, y, width, height} in canvas space
     const margin = 16 / zoom; // ~16px visual gap between panel and node, in canvas units
 
+    // Candidates are sized by the ACTUAL OVERLAP between panel and node, not
+    // the node's full dimensions. A real bug, not just a refinement: for a
+    // node much wider than the panel (a 699px-wide flagged layer against a
+    // 320px panel), "push past the entire node" jumps far more than
+    // necessary and commonly lands outside the visible viewport — when the
+    // panel can only ever overlap at most its own width/height of any node
+    // regardless of how large that node is, clearing the actual overlap is
+    // always sufficient and never requires a larger shift than clearing
+    // the whole node would.
+    const overlapLeft = Math.max(panelBox.x, nodeBox.x);
+    const overlapRight = Math.min(panelBox.x + panelBox.width, nodeBox.x + nodeBox.width);
+    const overlapTop = Math.max(panelBox.y, nodeBox.y);
+    const overlapBottom = Math.min(panelBox.y + panelBox.height, nodeBox.y + nodeBox.height);
+    const overlapWidth = overlapRight - overlapLeft;
+    const overlapHeight = overlapBottom - overlapTop;
+
     const candidates = [
-      { x: nodeBox.x + nodeBox.width + margin, y: panelBox.y }, // push right
-      { x: nodeBox.x - panelBox.width - margin, y: panelBox.y }, // push left
-      { x: panelBox.x, y: nodeBox.y + nodeBox.height + margin }, // push down
-      { x: panelBox.x, y: nodeBox.y - panelBox.height - margin }  // push up
+      { x: panelBox.x + overlapWidth + margin, y: panelBox.y }, // push right
+      { x: panelBox.x - overlapWidth - margin, y: panelBox.y }, // push left
+      { x: panelBox.x, y: panelBox.y + overlapHeight + margin }, // push down
+      { x: panelBox.x, y: panelBox.y - overlapHeight - margin }  // push up
     ];
 
     const valid = candidates.filter((c) => {

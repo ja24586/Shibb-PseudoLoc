@@ -121,6 +121,18 @@ issues before they hit your bottom line.
   — all counted together in the Summary as "Excluded / empty layers
   skipped," with the specific reason shown per layer when you expand that
   row.
+- **Locking checks the whole ancestor chain, not just the layer itself.**
+  Confirmed directly from Figma's own docs: a node's `locked` property is
+  independent of its parent's — a text layer can report `locked: false`
+  even while sitting inside a locked frame, and Figma's lock doesn't stop
+  a plugin from writing to it either way (it only blocks *user*
+  interaction on canvas). Found via real testing: a locked "Keyboard"
+  frame whose "Emoji" and "Dictation" keys were individually unlocked
+  still got pseudolocalized, because only the node's own flag was being
+  checked. Every ancestor up to the page is now checked, so locking a
+  parent frame protects everything under it, matching what locking a
+  frame actually implies to a person using Figma — even though Figma's
+  own API doesn't enforce that assumption on its own.
 
 ## How it runs
 
@@ -148,37 +160,69 @@ The post-run Summary displays:
 1. LOC issues found
 2. Locked/hidden layers skipped
 3. Excluded/empty layers skipped
-4. Already pseudolocalized (a plain count only — no chevron, nothing to
-   review, since there's nothing to act on)
+4. Already pseudolocalized (a plain count only — nothing to review, since
+   there's nothing to act on)
 5. Errors, such as missing typefaces
 
-Rows with findings bold their label and count, expand via a chevron to
-reveal a Back/Next reviewer, and auto-expand the highest-priority row with
-results (LOC issues first, then errors, then skips) when the Summary
-first appears. Only one row is expanded at a time. "Already pseudolocalized"
-sits outside this system entirely — it bolds like the others when nonzero,
-but never expands, since a count with nothing actionable behind it doesn't
-need a review panel.
+**One reviewer covers every category combined**, not four separate ones.
+LOC issues, locked/hidden skips, excluded/empty skips, and errors are
+concatenated into a single paged sequence — issues first, then errors,
+then skips, the same priority order the panel always used to decide what
+to show first — and paged through via one `<`/`>` pair and one "N of M"
+counter, fixed in the same place regardless of which category is current.
+This replaced an earlier version where each row expanded its own
+independent reviewer, which put the counter and buttons inside whichever
+category happened to be open — but a single shared counter that just sat
+generically at the top, disconnected from any row, turned out to have the
+opposite problem: nothing visually tied "item 15 of 44" to the specific
+category it actually belonged to. The fix keeps the nav bar fixed (still
+solving the original "buttons shouldn't move" problem) but physically
+relocates the content itself — node name and messages — via JS to sit
+directly after whichever category row is current, sharing that row's
+lighter background so the two read as one nested unit rather than two
+disconnected pieces of UI. Category rows stay the standard background
+otherwise; only the current one lightens, together with its content.
+Clicking a row with findings jumps the shared cursor to wherever that
+category starts in the combined sequence.
 
-Clicking through Back/Next jumps the canvas selection and viewport to the
-relevant layer, and the panel checks whether its own on-screen position now
+The `<`/`>` buttons sit in a fixed header, separate from the relocating
+content below them, so they never shift position as you page through
+items of different lengths or different categories — which is what
+actually makes them reliable for fast click-through review. Both wrap
+around at the ends — `>` on the last item goes to the first, `<` on the
+first goes to the last — matching how left/right arrow key navigation
+already behaves.
+
+Clicking through jumps the canvas selection and viewport to the relevant
+layer, and the panel checks whether its own on-screen position now
 overlaps that layer — if so, it nudges itself to whichever nearby position
 (up/down/left/right) requires the least movement while staying fully
-visible, or leaves itself alone if no such position exists. **Known
-limitation**: Figma's `figma.ui.reposition()` stops having any effect once
-the panel has been manually dragged by the user — a Plugin API limitation,
-not something fixable from plugin code.
+visible, or leaves itself alone if no such position exists. Candidate
+positions are sized by the actual overlap between panel and node, not the
+node's full dimensions — a real, reported bug: a node much wider than the
+panel (a 699px-wide flagged layer against a 320px panel) made "push past
+the entire node" jump far more than necessary and commonly land outside
+the visible viewport, when clearing just the actual overlap (capped at the
+panel's own width/height, regardless of how large the node is) is always
+sufficient. **Known limitation**: Figma's `figma.ui.reposition()` stops
+having any effect once the panel has been manually dragged by the user —
+a Plugin API limitation, not something fixable from plugin code. It's
+possible `getPosition()` also returns stale coordinates after a manual
+drag, which would affect this independently of the fix above — unconfirmed,
+since it can't be tested without live Figma access.
 
 Info icons next to "LOC issues found" and "Errors" show a definition on
 hover or keyboard focus (Material 3 plain-tooltip pattern — no click
 needed, and the tooltip clamps itself to stay within the panel rather than
 running off the edge).
 
-An **Export** button appears whenever any row has findings — not just
-errors — and generates a downloadable `.txt` file listing everything from
-the Summary: every LOC issue, every locked/hidden and excluded/empty skip,
-and every error, each in plain language with a direct resource link where
-relevant (e.g. a font's install page).
+An **Export Summary** link (tertiary style, matching Settings' Cancel —
+not a bordered button) appears whenever any row has findings, including
+"Already pseudolocalized," and generates a downloadable `.txt` file
+listing everything from the Summary: every LOC issue, every locked/hidden
+and excluded/empty skip, every error, and the already-pseudolocalized
+count, each in plain language with a direct resource link where relevant
+(e.g. a font's install page).
 
 The Summary follows Figma's own light/dark theme automatically, via
 `figma.showUI`'s `themeColors` option and Figma's `.figma-dark` class on
