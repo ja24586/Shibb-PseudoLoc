@@ -19,7 +19,6 @@ issues before they hit your bottom line.
 - 📋 Summary report describes each issue, with an exportable summary
 - ↔️ RTL (Arabic & Hebrew) option
 - 🈳 True edge-case stress testing via CJK, Thai, & Vietnamese charsets
-- 🌓 Automatically matches Figma's light/dark theme
 
 ## Details
 
