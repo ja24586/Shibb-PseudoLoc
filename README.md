@@ -20,7 +20,6 @@ issues before they hit your bottom line.
 - ↔️ RTL (Arabic & Hebrew) option
 - 🈳 True edge-case stress testing via CJK, Thai, & Vietnamese charsets
 - 🌓 Automatically matches Figma's light/dark theme
-- 📍 Review panel avoids covering the exact issue it's describing
 
 ## Details
 
